@@ -622,10 +622,7 @@ export default function App() {
             </button>
           ))}
 
-          <small>
-            Open another browser or Incognito window and choose a different user
-            to test chat.
-          </small>
+         
         </div>
       </main>
     );

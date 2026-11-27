@@ -1,173 +1,336 @@
-const express = require('express');
-const http = require('http');
-const cors = require('cors');
-const { Server } = require('socket.io');
+
+const express = require("express");
+const http = require("http");
+const cors = require("cors");
+const path = require("path");
+const fs = require("fs");
+const { Server } = require("socket.io");
 
 const PORT = process.env.PORT || 3000;
+
 const app = express();
-app.use(cors({ origin: true }));
-app.use(express.json());
-
 const server = http.createServer(app);
+
+app.use(cors({ origin: true }));
+app.use(express.json({ limit: "10mb" }));
+
 const io = new Server(server, {
-  cors: { origin: true },
-  // detect dead connections faster so online/offline status stays accurate
-  pingInterval: 10000,
-  pingTimeout: 8000,
+  cors: {
+    origin: true,
+    methods: ["GET", "POST"],
+  },
+  maxHttpBufferSize: 12e6,
 });
 
-const users = [
-  ['ajay', 'Ajay Tripathi', 'AT'],
-  ['rahul', 'Rahul Sharma', 'RS'],
-  ['priya', 'Priya Verma', 'PV'],
-  ['amit', 'Amit Kumar', 'AK'],
-  ['neha', 'Neha Singh', 'NS'],
-].map(([id, name, initials]) => ({ id, name, initials }));
+const USERS = [
+  "ryan",
+  "jasprit",
+  "rohit",
+  "sherphan",
+  "tilak",
+];
 
-// ---- In-memory state (resets when the server restarts) ----
-const messages = [];            // { id, senderId, receiverId, text, time, status, deletedForEveryone, deletedFor[] }
-const sockets = new Map();      // userId -> Set(socket.id)   (one user can have many tabs)
-const announced = new Set();    // users currently shown as "online" to everybody
-const lastSeen = {};            // userId -> ISO time
-const offlineTimers = new Map();
-const OFFLINE_GRACE_MS = 3000;  // page refresh / quick reconnect should not flicker to offline
+// Demo storage: data server memory mein rahega.
+let messages = [];
 
-const isConnected = (id) => (sockets.get(id)?.size || 0) > 0;
-const involves = (m, id) => m.senderId === id || m.receiverId === id;
-const toBoth = (a, b) => io.to(a).to(b);
+const userSockets = new Map();
+const lastSeen = {};
 
-// what the browser is allowed to see of a message
-const pub = (m) => ({
-  id: m.id,
-  senderId: m.senderId,
-  receiverId: m.receiverId,
-  text: m.deletedForEveryone ? '' : m.text,
-  time: m.time,
-  status: m.status,           // sent -> delivered -> read
-  deleted: m.deletedForEveryone,
-});
+function getOnlineUsers() {
+  return [...userSockets.entries()]
+    .filter(([, sockets]) => sockets.size > 0)
+    .map(([userId]) => userId);
+}
 
-app.get('/api/health', (q, s) => s.json({ ok: true }));
-app.get('/api/users', (q, s) => s.json(users));
+function getUserMessages(userId) {
+  return messages.filter(
+    (message) =>
+      (message.senderId === userId ||
+        message.receiverId === userId) &&
+      !(message.hiddenFor || []).includes(userId)
+  );
+}
 
-io.on('connection', (socket) => {
-  // ---------- join / presence ----------
-  socket.on('join', (id) => {
-    if (!users.some((u) => u.id === id)) return;
-    socket.data.userId = id;
-    socket.join(id);
-    if (!sockets.has(id)) sockets.set(id, new Set());
-    sockets.get(id).add(socket.id);
-    clearTimeout(offlineTimers.get(id));
-    offlineTimers.delete(id);
+function emitPresence(userId, online) {
+  io.emit("presence", {
+    userId,
+    online,
+    lastSeen: lastSeen[userId] || null,
+  });
+}
 
-    // messages sent while this user was offline are now DELIVERED
-    const bySender = {};
-    messages.forEach((m) => {
-      if (m.receiverId === id && m.status === 'sent') {
-        m.status = 'delivered';
-        (bySender[m.senderId] ||= []).push(m.id);
-      }
+function updateStatus(messageIds, status) {
+  const ids = [];
+
+  messages = messages.map((message) => {
+    if (
+      messageIds.includes(message.id) &&
+      message.status !== status
+    ) {
+      ids.push(message.id);
+      return { ...message, status };
+    }
+
+    return message;
+  });
+
+  if (ids.length) {
+    const affected = messages.filter((m) => ids.includes(m.id));
+
+    const senders = [...new Set(affected.map((m) => m.senderId))];
+
+    senders.forEach((senderId) => {
+      io.to(`user:${senderId}`).emit("status_update", {
+        ids,
+        status,
+      });
     });
-    Object.entries(bySender).forEach(([senderId, ids]) =>
-      io.to(senderId).emit('status_update', { ids, status: 'delivered' })
-    );
+  }
+}
 
-    socket.emit('initial_data', {
-      users,
-      online: [...announced],
+// Basic health check
+app.get("/api/health", (req, res) => {
+  res.json({
+    ok: true,
+    message: "UDTConnect server running",
+  });
+});
+
+// Socket events
+io.on("connection", (socket) => {
+  let currentUser = null;
+
+  socket.on("join", (userId) => {
+    if (!USERS.includes(userId)) return;
+
+    currentUser = userId;
+
+    socket.join(`user:${userId}`);
+
+    if (!userSockets.has(userId)) {
+      userSockets.set(userId, new Set());
+    }
+
+    const sockets = userSockets.get(userId);
+    const wasOffline = sockets.size === 0;
+
+    sockets.add(socket.id);
+
+    if (wasOffline) {
+      emitPresence(userId, true);
+    }
+
+    socket.emit("initial_data", {
+      messages: getUserMessages(userId),
+      online: getOnlineUsers(),
       lastSeen,
-      messages: messages.filter((m) => involves(m, id) && !m.deletedFor.includes(id)).map(pub),
     });
 
-    if (!announced.has(id)) {
-      announced.add(id);
-      io.emit('presence', { userId: id, online: true });
-    }
+    // Messages delivered when recipient comes online
+    const waiting = messages
+      .filter(
+        (message) =>
+          message.receiverId === userId &&
+          message.status === "sent" &&
+          !(message.hiddenFor || []).includes(userId)
+      )
+      .map((message) => message.id);
+
+    updateStatus(waiting, "delivered");
   });
 
-  // ---------- send ----------
-  // The client generates the id, so re-sending after a reconnect never creates duplicates.
-  socket.on('send_message', ({ id, receiverId, text } = {}, ack) => {
-    const senderId = socket.data.userId;
-    const body = typeof text === 'string' ? text.trim().slice(0, 2000) : '';
-    if (!senderId || senderId === receiverId || !users.some((u) => u.id === receiverId) || !body) {
-      return ack?.({ ok: false });
+  socket.on("send_message", (data, callback) => {
+    if (!currentUser) {
+      return callback?.({
+        ok: false,
+        message: "Please login first.",
+      });
     }
-    const wantedId = typeof id === 'string' && id.length > 0 && id.length <= 64 ? id : null;
-    let m = wantedId ? messages.find((x) => x.id === wantedId) : null;
-    if (m && m.senderId !== senderId) return ack?.({ ok: false });
 
-    if (!m) {
-      m = {
-        id: wantedId || Date.now() + '-' + Math.random().toString(16).slice(2),
-        senderId,
-        receiverId,
-        text: body,
-        time: new Date().toISOString(),
-        status: isConnected(receiverId) ? 'delivered' : 'sent',
-        deletedForEveryone: false,
-        deletedFor: [],
-      };
-      messages.push(m);
-      toBoth(senderId, receiverId).emit('message_update', pub(m));
+    if (
+      !data ||
+      !data.id ||
+      !USERS.includes(data.receiverId) ||
+      data.receiverId === currentUser
+    ) {
+      return callback?.({
+        ok: false,
+        message: "Invalid message details.",
+      });
     }
-    ack?.({ ok: true, message: pub(m) });
+
+    if (
+      !data.text?.trim() &&
+      !data.file
+    ) {
+      return callback?.({
+        ok: false,
+        message: "Message is empty.",
+      });
+    }
+
+    if (messages.some((m) => m.id === data.id)) {
+      return callback?.({
+        ok: false,
+        message: "Duplicate message.",
+      });
+    }
+
+    const receiverOnline =
+      (userSockets.get(data.receiverId)?.size || 0) > 0;
+
+    const message = {
+      id: data.id,
+      senderId: currentUser,
+      receiverId: data.receiverId,
+      text: data.text || "",
+      file: data.file || null,
+      time: new Date().toISOString(),
+      status: receiverOnline ? "delivered" : "sent",
+      deleted: false,
+      hiddenFor: [],
+    };
+
+    messages.push(message);
+
+    // Sender gets confirmed message
+    io.to(`user:${currentUser}`).emit("message_update", message);
+
+    // Receiver gets the message
+    io.to(`user:${data.receiverId}`).emit("message_update", message);
+
+    callback?.({
+      ok: true,
+      message,
+    });
   });
 
-  // ---------- read receipts ----------
-  socket.on('mark_read', ({ senderId } = {}) => {
-    const readerId = socket.data.userId;
-    if (!readerId || !senderId) return;
-    const ids = [];
-    messages.forEach((m) => {
-      if (m.senderId === senderId && m.receiverId === readerId && m.status !== 'read') {
-        m.status = 'read';
-        ids.push(m.id);
+  // Mark messages as read
+  socket.on("mark_read", ({ senderId } = {}) => {
+    if (!currentUser || !USERS.includes(senderId)) return;
+
+    const ids = messages
+      .filter(
+        (message) =>
+          message.senderId === senderId &&
+          message.receiverId === currentUser &&
+          message.status !== "read" &&
+          !(message.hiddenFor || []).includes(currentUser)
+      )
+      .map((message) => message.id);
+
+    updateStatus(ids, "read");
+  });
+
+  // Delete for me / everyone
+  socket.on("delete_message", ({ id, scope } = {}, callback) => {
+    if (!currentUser || !id) {
+      return callback?.({
+        ok: false,
+        message: "Invalid delete request.",
+      });
+    }
+
+    const message = messages.find((m) => m.id === id);
+
+    if (!message) {
+      return callback?.({
+        ok: false,
+        message: "Message not found.",
+      });
+    }
+
+    const isParticipant =
+      message.senderId === currentUser ||
+      message.receiverId === currentUser;
+
+    if (!isParticipant) {
+      return callback?.({
+        ok: false,
+        message: "You cannot delete this message.",
+      });
+    }
+
+    if (scope === "me") {
+      if (!message.hiddenFor) message.hiddenFor = [];
+
+      if (!message.hiddenFor.includes(currentUser)) {
+        message.hiddenFor.push(currentUser);
       }
-    });
-    if (ids.length) toBoth(senderId, readerId).emit('status_update', { ids, status: 'read' });
-  });
 
-  // ---------- delete (for me / for everyone) ----------
-  socket.on('delete_message', ({ id, scope } = {}, ack) => {
-    const userId = socket.data.userId;
-    const m = messages.find((x) => x.id === id && involves(x, userId));
-    if (!m) return ack?.({ ok: false });
+      io.to(`user:${currentUser}`).emit("message_deleted", {
+        id,
+        scope: "me",
+      });
 
-    if (scope === 'everyone') {
-      if (m.senderId !== userId) return ack?.({ ok: false }); // only the sender can delete for everyone
-      m.deletedForEveryone = true;
-      m.text = '';
-      toBoth(m.senderId, m.receiverId).emit('message_deleted', { id, scope: 'everyone' });
-    } else {
-      if (!m.deletedFor.includes(userId)) m.deletedFor.push(userId);
-      io.to(userId).emit('message_deleted', { id, scope: 'me' });
-      if (m.deletedFor.length >= 2) messages.splice(messages.indexOf(m), 1); // both removed it
+      return callback?.({ ok: true });
     }
-    ack?.({ ok: true });
+
+    if (scope === "everyone") {
+      if (message.senderId !== currentUser) {
+        return callback?.({
+          ok: false,
+          message: "Only sender can delete for everyone.",
+        });
+      }
+
+      message.deleted = true;
+      message.text = "";
+      message.file = null;
+
+      io.to(`user:${message.senderId}`).emit("message_deleted", {
+        id,
+        scope: "everyone",
+      });
+
+      io.to(`user:${message.receiverId}`).emit("message_deleted", {
+        id,
+        scope: "everyone",
+      });
+
+      return callback?.({ ok: true });
+    }
+
+    callback?.({
+      ok: false,
+      message: "Invalid delete option.",
+    });
   });
 
-  // ---------- disconnect ----------
-  socket.on('disconnect', () => {
-    const id = socket.data.userId;
-    if (!id) return;
-    const set = sockets.get(id);
-    set?.delete(socket.id);
-    if (set && set.size) return; // still connected from another tab
-    sockets.delete(id);
-    const seen = new Date().toISOString();
-    offlineTimers.set(
-      id,
-      setTimeout(() => {
-        offlineTimers.delete(id);
-        if (isConnected(id)) return;
-        announced.delete(id);
-        lastSeen[id] = seen;
-        io.emit('presence', { userId: id, online: false, lastSeen: seen });
-      }, OFFLINE_GRACE_MS)
-    );
+  socket.on("disconnect", () => {
+    if (!currentUser) return;
+
+    const sockets = userSockets.get(currentUser);
+
+    if (sockets) {
+      sockets.delete(socket.id);
+
+      if (sockets.size === 0) {
+        userSockets.delete(currentUser);
+
+        lastSeen[currentUser] = new Date().toISOString();
+
+        emitPresence(currentUser, false);
+      }
+    }
   });
 });
 
-server.listen(PORT, () => console.log(`Connectly server running at http://localhost:${PORT}`));
+// Serve React production build
+const frontendPath = path.join(__dirname, "../frontend/dist");
+
+if (fs.existsSync(frontendPath)) {
+  app.use(express.static(frontendPath));
+
+  app.use((req, res, next) => {
+    if (req.method !== "GET" || req.path.startsWith("/api/")) {
+      return next();
+    }
+
+    res.sendFile(path.join(frontendPath, "index.html"));
+  });
+}
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`UDTConnect server running on port ${PORT}`);
+});

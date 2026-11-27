@@ -22,18 +22,66 @@ const io = new Server(server, {
   maxHttpBufferSize: 12e6,
 });
 
-// Demo users
 const USERS = [
-  { id: "ryan", name: "Ryan" },
-  { id: "jasprit", name: "Jasprit" },
-  { id: "rohit", name: "Rohit" },
-  { id: "sherphan", name: "Sherphan" },
-  { id: "tilak", name: "Tilak" },
+  { id: "ryan", name: "Ryan Rickelton", initials: "RR" },
+  { id: "jasprit", name: "Jasprit Bumrah", initials: "JB" },
+  { id: "rohit", name: "Rohit Sharma", initials: "RS" },
+  { id: "sherphan", name: "Sherphan Rutherford", initials: "SR" },
+  { id: "tilak", name: "Tilak Verma", initials: "TV" },
 ];
 
 let messages = [];
+
 const userSockets = new Map();
 const lastSeen = {};
+
+function getOnlineUsers() {
+  return [...userSockets.keys()];
+}
+
+function getUserMessages(userId) {
+  return messages.filter(
+    (message) =>
+      (message.senderId === userId || message.receiverId === userId) &&
+      !message.deletedFor?.includes(userId)
+  );
+}
+
+function emitPresence() {
+  io.emit("presence", {
+    online: false,
+  });
+
+  USERS.forEach((user) => {
+    io.emit("presence", {
+      userId: user.id,
+      online: userSockets.has(user.id),
+      lastSeen: lastSeen[user.id] || null,
+    });
+  });
+}
+
+function updateMessageStatus(message, status) {
+  if (!message || message.status === "read") return;
+
+  if (message.status === "delivered" && status === "sent") return;
+
+  message.status = status;
+
+  const senderSockets = io.to(message.senderId);
+  const receiverSockets = io.to(message.receiverId);
+
+  const payload = {
+    ids: [message.id],
+    status,
+  };
+
+  senderSockets.emit("status_update", payload);
+  receiverSockets.emit("status_update", payload);
+
+  senderSockets.emit("message_update", message);
+  receiverSockets.emit("message_update", message);
+}
 
 // Health check
 app.get("/api/health", (req, res) => {
@@ -43,38 +91,12 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Users API
+// Users
 app.get("/api/users", (req, res) => {
   res.json(USERS);
 });
 
-// Online users
-function getOnlineUsers() {
-  return [...userSockets.keys()];
-}
-
-// Presence update
-function emitPresence() {
-  io.emit("presence_update", {
-    onlineUsers: getOnlineUsers(),
-    lastSeen,
-  });
-}
-
-// Message status update
-function updateStatus(messageId, status) {
-  const message = messages.find((m) => m.id === messageId);
-
-  if (message) {
-    message.status = status;
-    io.emit("message_status", {
-      messageId,
-      status,
-    });
-  }
-}
-
-// Get messages
+// Messages API
 app.get("/api/messages", (req, res) => {
   const { user1, user2 } = req.query;
 
@@ -84,23 +106,28 @@ app.get("/api/messages", (req, res) => {
     });
   }
 
-  const chatMessages = messages.filter(
-    (m) =>
-      (m.senderId === user1 && m.receiverId === user2) ||
-      (m.senderId === user2 && m.receiverId === user1)
+  const result = messages.filter(
+    (message) =>
+      !message.deletedFor?.includes(user1) &&
+      (
+        (message.senderId === user1 && message.receiverId === user2) ||
+        (message.senderId === user2 && message.receiverId === user1)
+      )
   );
 
-  res.json(chatMessages);
+  res.json(result);
 });
 
 // Socket connection
 io.on("connection", (socket) => {
-  console.log("Socket connected:", socket.id);
+  console.log("Connected:", socket.id);
 
+  // Join user account
   socket.on("join", (userId) => {
     if (!userId) return;
 
     socket.userId = userId;
+    socket.join(userId);
 
     if (!userSockets.has(userId)) {
       userSockets.set(userId, new Set());
@@ -108,17 +135,22 @@ io.on("connection", (socket) => {
 
     userSockets.get(userId).add(socket.id);
 
-    socket.join(userId);
+    // Send initial data in the format expected by App.jsx
+    socket.emit("initial_data", {
+      online: getOnlineUsers(),
+      lastSeen,
+      messages: getUserMessages(userId),
+    });
 
     emitPresence();
 
-    // Notify sender when receiver comes online
+    // Mark pending messages as delivered when receiver joins
     messages.forEach((message) => {
       if (
         message.receiverId === userId &&
         message.status === "sent"
       ) {
-        updateStatus(message.id, "delivered");
+        updateMessageStatus(message, "delivered");
       }
     });
 
@@ -126,8 +158,39 @@ io.on("connection", (socket) => {
   });
 
   // Send message
-  socket.on("send_message", (data) => {
-    if (!data || !data.senderId || !data.receiverId) return;
+  socket.on("send_message", (data, callback) => {
+    if (!data || !data.senderId || !data.receiverId) {
+      if (typeof callback === "function") {
+        callback({
+          ok: false,
+          message: "Invalid message data",
+        });
+      }
+      return;
+    }
+
+    if (socket.userId !== data.senderId) {
+      if (typeof callback === "function") {
+        callback({
+          ok: false,
+          message: "Sender account mismatch",
+        });
+      }
+      return;
+    }
+
+    // Avoid duplicate messages during reconnection
+    const existing = messages.find((m) => m.id === data.id);
+
+    if (existing) {
+      if (typeof callback === "function") {
+        callback({
+          ok: true,
+          message: existing,
+        });
+      }
+      return;
+    }
 
     const message = {
       id: data.id || `${Date.now()}-${Math.random()}`,
@@ -135,89 +198,150 @@ io.on("connection", (socket) => {
       receiverId: data.receiverId,
       text: data.text || "",
       file: data.file || null,
-      fileName: data.fileName || "",
-      fileType: data.fileType || "",
-      timestamp: data.timestamp || new Date().toISOString(),
+      time: data.time || new Date().toISOString(),
       status: "sent",
+      deleted: false,
       deletedFor: [],
-      deletedForEveryone: false,
     };
 
     messages.push(message);
 
-    // Sender receives message confirmation
-    io.to(data.senderId).emit("receive_message", message);
-
-    // Receiver receives message
-    io.to(data.receiverId).emit("receive_message", message);
-
-    // Delivered status
-    if (userSockets.has(data.receiverId)) {
-      updateStatus(message.id, "delivered");
+    // Receiver online = delivered
+    if (userSockets.has(message.receiverId)) {
+      message.status = "delivered";
     }
+
+    // Send update to both users
+    io.to(message.senderId).emit("message_update", message);
+    io.to(message.receiverId).emit("message_update", message);
+
+    // Send acknowledgement to frontend
+    if (typeof callback === "function") {
+      callback({
+        ok: true,
+        message,
+      });
+    }
+
+    console.log("Message sent:", message.id, message.status);
   });
 
-  // Read messages
-  socket.on("mark_read", ({ senderId, receiverId }) => {
-    messages.forEach((message) => {
-      if (
+  // Mark messages as read
+  socket.on("mark_read", (data) => {
+    if (!data || !data.senderId || !socket.userId) return;
+
+    const receiverId = socket.userId;
+    const senderId = data.senderId;
+
+    const readMessages = messages.filter(
+      (message) =>
         message.senderId === senderId &&
         message.receiverId === receiverId &&
-        message.status !== "read"
-      ) {
-        updateStatus(message.id, "read");
-      }
+        message.status !== "read" &&
+        !message.deleted
+    );
+
+    if (readMessages.length === 0) return;
+
+    readMessages.forEach((message) => {
+      message.status = "read";
     });
 
-    io.to(senderId).emit("messages_read", {
-      senderId,
-      receiverId,
-    });
+    const payload = {
+      ids: readMessages.map((message) => message.id),
+      status: "read",
+    };
+
+    io.to(senderId).emit("status_update", payload);
+    io.to(receiverId).emit("status_update", payload);
+
+    console.log("Messages read:", payload.ids.length);
   });
 
   // Delete message
-  socket.on("delete_message", ({ messageId, userId, deleteFor }) => {
-    const message = messages.find((m) => m.id === messageId);
+  socket.on("delete_message", (data, callback) => {
+    if (!data || !data.id || !socket.userId) {
+      if (typeof callback === "function") {
+        callback({
+          ok: false,
+          message: "Invalid delete request",
+        });
+      }
+      return;
+    }
 
-    if (!message) return;
+    const message = messages.find((m) => m.id === data.id);
 
-    if (deleteFor === "everyone") {
-      message.deletedForEveryone = true;
+    if (!message) {
+      if (typeof callback === "function") {
+        callback({
+          ok: false,
+          message: "Message not found",
+        });
+      }
+      return;
+    }
+
+    const userId = socket.userId;
+
+    if (data.scope === "everyone") {
+      if (message.senderId !== userId) {
+        if (typeof callback === "function") {
+          callback({
+            ok: false,
+            message: "Only the sender can delete for everyone",
+          });
+        }
+        return;
+      }
+
+      message.deleted = true;
       message.text = "";
       message.file = null;
 
-      io.emit("message_deleted", {
-        messageId,
-        deleteFor: "everyone",
-      });
+      const payload = {
+        id: message.id,
+        scope: "everyone",
+      };
+
+      io.to(message.senderId).emit("message_deleted", payload);
+      io.to(message.receiverId).emit("message_deleted", payload);
+
     } else {
       if (!message.deletedFor.includes(userId)) {
         message.deletedFor.push(userId);
       }
 
-      io.to(userId).emit("message_deleted", {
-        messageId,
-        deleteFor: "me",
+      socket.emit("message_deleted", {
+        id: message.id,
+        scope: "me",
       });
     }
+
+    if (typeof callback === "function") {
+      callback({ ok: true });
+    }
+
+    console.log("Message deleted:", message.id, data.scope);
   });
 
   // Disconnect
   socket.on("disconnect", () => {
     const userId = socket.userId;
 
-    if (userId && userSockets.has(userId)) {
-      userSockets.get(userId).delete(socket.id);
+    if (!userId || !userSockets.has(userId)) return;
 
-      if (userSockets.get(userId).size === 0) {
-        userSockets.delete(userId);
-        lastSeen[userId] = new Date().toISOString();
-      }
+    const sockets = userSockets.get(userId);
+    sockets.delete(socket.id);
 
-      emitPresence();
+    if (sockets.size === 0) {
+      userSockets.delete(userId);
+      lastSeen[userId] = new Date().toISOString();
     }
 
-    console.log("Socket disconnected:", socket.id);
+    emitPresence();
+
+    console.log("Disconnected:", userId);
   });
 });
 
@@ -227,8 +351,12 @@ const frontendDist = path.join(__dirname, "../frontend/dist");
 if (fs.existsSync(frontendDist)) {
   app.use(express.static(frontendDist));
 
-  app.get("/{*splat}", (req, res, next) => {
-    if (req.path.startsWith("/api/")) {
+  app.use((req, res, next) => {
+    if (
+      req.method !== "GET" ||
+      req.path.startsWith("/api/") ||
+      req.path.startsWith("/socket.io/")
+    ) {
       return next();
     }
 
@@ -246,5 +374,5 @@ if (fs.existsSync(frontendDist)) {
 
 // Start server
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`UDTConnect server running on port ${PORT}`);
+  console.log(`UDTConnect running on port ${PORT}`);
 });

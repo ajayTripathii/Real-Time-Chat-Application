@@ -22,6 +22,15 @@ const io = new Server(server, {
   maxHttpBufferSize: 12e6,
 });
 
+// Homepage route
+app.get("/", (req, res) => {
+  res.send(`
+    <h1>UDTConnect Server Running Successfully!</h1>
+    <p>Backend and Socket.IO server are live.</p>
+    <p>Health Check: <a href="/api/health">Check Server Status</a></p>
+  `);
+});
+
 const USERS = [
   "ryan",
   "jasprit",
@@ -75,9 +84,13 @@ function updateStatus(messageIds, status) {
   });
 
   if (ids.length) {
-    const affected = messages.filter((m) => ids.includes(m.id));
+    const affected = messages.filter((m) =>
+      ids.includes(m.id)
+    );
 
-    const senders = [...new Set(affected.map((m) => m.senderId))];
+    const senders = [
+      ...new Set(affected.map((m) => m.senderId)),
+    ];
 
     senders.forEach((senderId) => {
       io.to(`user:${senderId}`).emit("status_update", {
@@ -88,7 +101,7 @@ function updateStatus(messageIds, status) {
   }
 }
 
-// Basic health check
+// Health check
 app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
@@ -126,7 +139,6 @@ io.on("connection", (socket) => {
       lastSeen,
     });
 
-    // Messages delivered when recipient comes online
     const waiting = messages
       .filter(
         (message) =>
@@ -159,10 +171,7 @@ io.on("connection", (socket) => {
       });
     }
 
-    if (
-      !data.text?.trim() &&
-      !data.file
-    ) {
+    if (!data.text?.trim() && !data.file) {
       return callback?.({
         ok: false,
         message: "Message is empty.",
@@ -193,11 +202,15 @@ io.on("connection", (socket) => {
 
     messages.push(message);
 
-    // Sender gets confirmed message
-    io.to(`user:${currentUser}`).emit("message_update", message);
+    io.to(`user:${currentUser}`).emit(
+      "message_update",
+      message
+    );
 
-    // Receiver gets the message
-    io.to(`user:${data.receiverId}`).emit("message_update", message);
+    io.to(`user:${data.receiverId}`).emit(
+      "message_update",
+      message
+    );
 
     callback?.({
       ok: true,
@@ -223,79 +236,93 @@ io.on("connection", (socket) => {
   });
 
   // Delete for me / everyone
-  socket.on("delete_message", ({ id, scope } = {}, callback) => {
-    if (!currentUser || !id) {
-      return callback?.({
-        ok: false,
-        message: "Invalid delete request.",
-      });
-    }
-
-    const message = messages.find((m) => m.id === id);
-
-    if (!message) {
-      return callback?.({
-        ok: false,
-        message: "Message not found.",
-      });
-    }
-
-    const isParticipant =
-      message.senderId === currentUser ||
-      message.receiverId === currentUser;
-
-    if (!isParticipant) {
-      return callback?.({
-        ok: false,
-        message: "You cannot delete this message.",
-      });
-    }
-
-    if (scope === "me") {
-      if (!message.hiddenFor) message.hiddenFor = [];
-
-      if (!message.hiddenFor.includes(currentUser)) {
-        message.hiddenFor.push(currentUser);
-      }
-
-      io.to(`user:${currentUser}`).emit("message_deleted", {
-        id,
-        scope: "me",
-      });
-
-      return callback?.({ ok: true });
-    }
-
-    if (scope === "everyone") {
-      if (message.senderId !== currentUser) {
+  socket.on(
+    "delete_message",
+    ({ id, scope } = {}, callback) => {
+      if (!currentUser || !id) {
         return callback?.({
           ok: false,
-          message: "Only sender can delete for everyone.",
+          message: "Invalid delete request.",
         });
       }
 
-      message.deleted = true;
-      message.text = "";
-      message.file = null;
+      const message = messages.find((m) => m.id === id);
 
-      io.to(`user:${message.senderId}`).emit("message_deleted", {
-        id,
-        scope: "everyone",
+      if (!message) {
+        return callback?.({
+          ok: false,
+          message: "Message not found.",
+        });
+      }
+
+      const isParticipant =
+        message.senderId === currentUser ||
+        message.receiverId === currentUser;
+
+      if (!isParticipant) {
+        return callback?.({
+          ok: false,
+          message: "You cannot delete this message.",
+        });
+      }
+
+      if (scope === "me") {
+        if (!message.hiddenFor) {
+          message.hiddenFor = [];
+        }
+
+        if (!message.hiddenFor.includes(currentUser)) {
+          message.hiddenFor.push(currentUser);
+        }
+
+        io.to(`user:${currentUser}`).emit(
+          "message_deleted",
+          {
+            id,
+            scope: "me",
+          }
+        );
+
+        return callback?.({ ok: true });
+      }
+
+      if (scope === "everyone") {
+        if (message.senderId !== currentUser) {
+          return callback?.({
+            ok: false,
+            message: "Only sender can delete for everyone.",
+          });
+        }
+
+        message.deleted = true;
+        message.text = "";
+        message.file = null;
+
+        io.to(`user:${message.senderId}`).emit(
+          "message_deleted",
+          {
+            id,
+            scope: "everyone",
+          }
+        );
+
+        io.to(`user:${message.receiverId}`).emit(
+          "message_deleted",
+          {
+            id,
+            scope: "everyone",
+          }
+        );
+
+        return callback?.({ ok: true });
+      }
+
+      callback?.({
+        ok: false,
+        message: "Invalid delete option.",
       });
-
-      io.to(`user:${message.receiverId}`).emit("message_deleted", {
-        id,
-        scope: "everyone",
-      });
-
-      return callback?.({ ok: true });
     }
-
-    callback?.({
-      ok: false,
-      message: "Invalid delete option.",
-    });
-  });
+  );
 
   socket.on("disconnect", () => {
     if (!currentUser) return;
@@ -316,14 +343,18 @@ io.on("connection", (socket) => {
   });
 });
 
-// Serve React production build
+// Serve React production build if available
 const frontendPath = path.join(__dirname, "../frontend/dist");
 
 if (fs.existsSync(frontendPath)) {
   app.use(express.static(frontendPath));
 
   app.use((req, res, next) => {
-    if (req.method !== "GET" || req.path.startsWith("/api/")) {
+    if (
+      req.method !== "GET" ||
+      req.path.startsWith("/api/") ||
+      req.path.startsWith("/socket.io/")
+    ) {
       return next();
     }
 
@@ -331,6 +362,7 @@ if (fs.existsSync(frontendPath)) {
   });
 }
 
+// Start server
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`UDTConnect server running on port ${PORT}`);
 });

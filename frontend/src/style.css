@@ -1501,3 +1501,182 @@ svg {
     padding: 22px 20px 16px;
   }
 }
+/* CALL HISTORY */
+.call-history-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+}
+
+.call-history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px;
+  border-bottom: 1px solid rgba(120, 130, 140, 0.12);
+}
+
+.call-history-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.call-history-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.call-history-text strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-history-text small {
+  color: #718096;
+  font-size: 12px;
+}
+
+.call-history-text .missed-call-text {
+  color: #e5484d;
+}
+
+.call-history-main time {
+  color: #87909c;
+  font-size: 11px;
+}
+
+.call-history-again {
+  width: 38px;
+  height: 38px;
+  border: 0;
+  border-radius: 50%;
+  color: #168b65;
+  background: #e7f6ef;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.voice-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.voice-preview audio {
+  max-width: 220px;
+  height: 36px;
+}
+
+.voice-recording-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 8px 14px;
+}
+
+.voice-recording-actions button {
+  border: 0;
+  border-radius: 18px;
+  padding: 7px 12px;
+  cursor: pointer;
+  background: #e8f5ee;
+  color: #16764f;
+}
+
+.recording-indicator {
+  color: #df3434;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.recording-btn {
+  background: #e5484d !important;
+  color: white !important;
+}
+
+@media (max-width: 760px) {
+  .call-history-list {
+    padding: 6px;
+  }
+
+  .call-history-item {
+    padding: 10px 5px;
+  }
+
+  .voice-recording-actions {
+    gap: 7px;
+    flex-wrap: wrap;
+  }
+
+  .voice-preview audio {
+    max-width: 180px;
+  }
+}
+
+/* Call audio controls: speaker toggle and compact responsive layout */
+.call-control {
+  min-width: 66px;
+  touch-action: manipulation;
+}
+
+.call-control small {
+  white-space: nowrap;
+}
+
+.call-control.control-active span {
+  background: #fff;
+  color: #17121f;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.12);
+}
+
+@media (max-width: 760px) {
+  .call-bottom {
+    padding: 18px 10px max(24px, env(safe-area-inset-bottom));
+  }
+
+  .active-controls,
+  .incoming-controls {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 14px 18px;
+  }
+
+  .call-control span {
+    width: 54px;
+    height: 54px;
+  }
+
+  .call-control small {
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 380px) {
+  .active-controls,
+  .incoming-controls {
+    gap: 12px;
+  }
+
+  .call-control {
+    min-width: 58px;
+  }
+
+  .call-control span {
+    width: 50px;
+    height: 50px;
+  }
+}

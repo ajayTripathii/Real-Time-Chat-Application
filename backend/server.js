@@ -7,7 +7,6 @@ const path = require("path");
 const fs = require("fs");
 
 const PORT = process.env.PORT || 3000;
-
 const app = express();
 const server = http.createServer(app);
 
@@ -31,16 +30,57 @@ const USERS = [
 ];
 
 let messages = [];
-
 const userSockets = new Map();
 const lastSeen = {};
+const calls = new Map();
+const missedCalls = new Map();
 
-// Active WebRTC calls
-const activeCalls = new Map();
+const DATA_DIR = path.join(__dirname, "data");
+const DATA_FILE = path.join(DATA_DIR, "chat-data.json");
 
-// =====================================
-// HELPER FUNCTIONS
-// =====================================
+function loadData() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+    if (fs.existsSync(DATA_FILE)) {
+      const saved = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+      messages = saved.messages || [];
+
+      Object.entries(saved.missedCalls || {}).forEach(([id, list]) => {
+        missedCalls.set(id, list);
+      });
+
+      Object.assign(lastSeen, saved.lastSeen || {});
+    }
+
+    console.log("Chat and call history loaded.");
+  } catch (error) {
+    console.error("Data load error:", error);
+  }
+}
+
+function saveData() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+    const missed = Object.fromEntries(missedCalls.entries());
+
+    fs.writeFileSync(
+      DATA_FILE,
+      JSON.stringify({ messages, missedCalls: missed, lastSeen }, null, 2)
+    );
+  } catch (error) {
+    console.error("Data save error:", error);
+  }
+}
+
+function newId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isValidUser(id) {
+  return USERS.some((user) => user.id === id);
+}
 
 function getOnlineUsers() {
   return [...userSockets.keys()];
@@ -49,17 +89,12 @@ function getOnlineUsers() {
 function getUserMessages(userId) {
   return messages.filter(
     (message) =>
-      (message.senderId === userId ||
-        message.receiverId === userId) &&
+      (message.senderId === userId || message.receiverId === userId) &&
       !message.deletedFor?.includes(userId)
   );
 }
 
 function emitPresence() {
-  io.emit("presence", {
-    online: false,
-  });
-
   USERS.forEach((user) => {
     io.emit("presence", {
       userId: user.id,
@@ -71,121 +106,103 @@ function emitPresence() {
 
 function updateMessageStatus(message, status) {
   if (!message || message.status === "read") return;
-
-  if (message.status === "delivered" && status === "sent") {
-    return;
-  }
+  if (message.status === "delivered" && status === "sent") return;
 
   message.status = status;
 
-  const payload = {
-    ids: [message.id],
-    status,
-  };
+  const payload = { ids: [message.id], status };
 
   io.to(message.senderId).emit("status_update", payload);
   io.to(message.receiverId).emit("status_update", payload);
-
   io.to(message.senderId).emit("message_update", message);
   io.to(message.receiverId).emit("message_update", message);
 }
 
-// Get valid call
-function getCall(callId, userId) {
-  const call = activeCalls.get(callId);
+function addMissedCall(userId, callData) {
+  if (!missedCalls.has(userId)) missedCalls.set(userId, []);
 
-  if (!call) return null;
-
-  if (
-    call.callerId !== userId &&
-    call.receiverId !== userId
-  ) {
-    return null;
+  const list = missedCalls.get(userId);
+  if (!list.some((item) => item.callId === callData.callId)) {
+    list.push(callData);
+    missedCalls.set(userId, list);
+    saveData();
   }
-
-  return call;
 }
 
-// End active call
-function endActiveCall(callId, endedBy) {
-  const call = activeCalls.get(callId);
+function getCallPeer(call, userId) {
+  return call.callerId === userId ? call.receiverId : call.callerId;
+}
 
+function finishCall(callId, reason = "ended", endedBy = null) {
+  const call = calls.get(callId);
   if (!call) return;
 
-  const otherUser =
-    call.callerId === endedBy
-      ? call.receiverId
-      : call.callerId;
+  const peerId = endedBy ? getCallPeer(call, endedBy) : null;
 
-  io.to(otherUser).emit("call_ended", {
+  if (!call.connected && reason !== "rejected") {
+    const missedUser = call.callerId;
+    const missedPayload = {
+      callId: call.callId,
+      callerId: call.callerId,
+      callType: call.callType,
+      time: call.time,
+    };
+
+    if (missedUser !== endedBy) addMissedCall(missedUser, missedPayload);
+  }
+
+  io.to(call.callerId).emit("call_ended", {
     callId,
-    endedBy,
+    reason,
   });
 
-  activeCalls.delete(callId);
+  io.to(call.receiverId).emit("call_ended", {
+    callId,
+    reason,
+  });
+
+  if (peerId) {
+    io.to(peerId).emit("call_ended", {
+      callId,
+      reason,
+    });
+  }
+
+  calls.delete(callId);
 }
 
-// =====================================
-// HEALTH CHECK
-// =====================================
-
 app.get("/api/health", (req, res) => {
-  res.json({
-    ok: true,
-    message: "UDTConnect server running",
-  });
+  res.json({ ok: true, message: "UDTConnect server running" });
 });
-
-// =====================================
-// USERS API
-// =====================================
 
 app.get("/api/users", (req, res) => {
   res.json(USERS);
 });
 
-// =====================================
-// MESSAGES API
-// =====================================
-
 app.get("/api/messages", (req, res) => {
   const { user1, user2 } = req.query;
 
   if (!user1 || !user2) {
-    return res.status(400).json({
-      error: "user1 and user2 are required",
-    });
+    return res.status(400).json({ error: "user1 and user2 are required" });
   }
 
   const result = messages.filter(
     (message) =>
       !message.deletedFor?.includes(user1) &&
       (
-        (message.senderId === user1 &&
-          message.receiverId === user2) ||
-        (message.senderId === user2 &&
-          message.receiverId === user1)
+        (message.senderId === user1 && message.receiverId === user2) ||
+        (message.senderId === user2 && message.receiverId === user1)
       )
   );
 
   res.json(result);
 });
 
-// =====================================
-// SOCKET CONNECTION
-// =====================================
-
 io.on("connection", (socket) => {
   console.log("Connected:", socket.id);
 
-  // =====================================
-  // JOIN USER
-  // =====================================
-
   socket.on("join", (userId) => {
-    if (!USERS.some((user) => user.id === userId)) {
-      return;
-    }
+    if (!isValidUser(userId)) return;
 
     socket.userId = userId;
     socket.join(userId);
@@ -205,49 +222,49 @@ io.on("connection", (socket) => {
     emitPresence();
 
     messages.forEach((message) => {
-      if (
-        message.receiverId === userId &&
-        message.status === "sent"
-      ) {
+      if (message.receiverId === userId && message.status === "sent") {
         updateMessageStatus(message, "delivered");
       }
     });
 
+    // Deliver queued offline missed calls.
+    const queuedCalls = missedCalls.get(userId) || [];
+
+    queuedCalls.forEach((item) => {
+      socket.emit("missed_call", item);
+    });
+
+    if (queuedCalls.length) {
+      missedCalls.delete(userId);
+      saveData();
+    }
+
     console.log(userId, "joined");
   });
 
-  // =====================================
-  // SEND MESSAGE
-  // =====================================
+  // ---------------- MESSAGES ----------------
 
   socket.on("send_message", (data, callback) => {
-    if (!data || !data.senderId || !data.receiverId) {
-      return callback?.({
-        ok: false,
-        message: "Invalid message data",
-      });
+    if (
+      !data ||
+      !data.senderId ||
+      !data.receiverId ||
+      socket.userId !== data.senderId ||
+      !isValidUser(data.receiverId)
+    ) {
+      callback?.({ ok: false, message: "Invalid message data" });
+      return;
     }
 
-    if (socket.userId !== data.senderId) {
-      return callback?.({
-        ok: false,
-        message: "Sender account mismatch",
-      });
-    }
-
-    const existing = messages.find(
-      (message) => message.id === data.id
-    );
+    const existing = messages.find((m) => m.id === data.id);
 
     if (existing) {
-      return callback?.({
-        ok: true,
-        message: existing,
-      });
+      callback?.({ ok: true, message: existing });
+      return;
     }
 
     const message = {
-      id: data.id || `${Date.now()}-${Math.random()}`,
+      id: data.id || newId(),
       senderId: data.senderId,
       receiverId: data.receiverId,
       text: data.text || "",
@@ -267,20 +284,12 @@ io.on("connection", (socket) => {
     io.to(message.senderId).emit("message_update", message);
     io.to(message.receiverId).emit("message_update", message);
 
-    callback?.({
-      ok: true,
-      message,
-    });
-
-    console.log("Message sent:", message.id);
+    saveData();
+    callback?.({ ok: true, message });
   });
 
-  // =====================================
-  // MARK MESSAGE AS READ
-  // =====================================
-
   socket.on("mark_read", (data) => {
-    if (!data || !data.senderId || !socket.userId) return;
+    if (!data?.senderId || !socket.userId) return;
 
     const receiverId = socket.userId;
     const senderId = data.senderId;
@@ -293,7 +302,7 @@ io.on("connection", (socket) => {
         !message.deleted
     );
 
-    if (readMessages.length === 0) return;
+    if (!readMessages.length) return;
 
     readMessages.forEach((message) => {
       message.status = "read";
@@ -306,55 +315,41 @@ io.on("connection", (socket) => {
 
     io.to(senderId).emit("status_update", payload);
     io.to(receiverId).emit("status_update", payload);
-
-    console.log("Messages read:", payload.ids.length);
+    saveData();
   });
 
-  // =====================================
-  // DELETE MESSAGE
-  // =====================================
-
   socket.on("delete_message", (data, callback) => {
-    if (!data || !data.id || !socket.userId) {
-      return callback?.({
-        ok: false,
-        message: "Invalid delete request",
-      });
+    if (!data?.id || !socket.userId) {
+      callback?.({ ok: false, message: "Invalid delete request" });
+      return;
     }
 
-    const message = messages.find(
-      (item) => item.id === data.id
-    );
+    const message = messages.find((m) => m.id === data.id);
 
     if (!message) {
-      return callback?.({
-        ok: false,
-        message: "Message not found",
-      });
+      callback?.({ ok: false, message: "Message not found" });
+      return;
     }
 
     const userId = socket.userId;
 
     if (data.scope === "everyone") {
       if (message.senderId !== userId) {
-        return callback?.({
+        callback?.({
           ok: false,
-          message: "Only sender can delete for everyone",
+          message: "Only the sender can delete for everyone",
         });
+        return;
       }
 
       message.deleted = true;
       message.text = "";
       message.file = null;
 
-      const payload = {
-        id: message.id,
-        scope: "everyone",
-      };
+      const payload = { id: message.id, scope: "everyone" };
 
       io.to(message.senderId).emit("message_deleted", payload);
       io.to(message.receiverId).emit("message_deleted", payload);
-
     } else {
       if (!message.deletedFor.includes(userId)) {
         message.deletedFor.push(userId);
@@ -366,243 +361,174 @@ io.on("connection", (socket) => {
       });
     }
 
+    saveData();
     callback?.({ ok: true });
-
-    console.log("Message deleted:", message.id);
   });
 
-  // =====================================
-  // WEBRTC AUDIO / VIDEO CALLING
-  // =====================================
+  // ---------------- AUDIO / VIDEO CALLS ----------------
 
-  // START CALL
-  socket.on("call_user", (data, callback) => {
+  socket.on("call_user", (data = {}, callback) => {
     const callerId = socket.userId;
-    const receiverId = data?.to;
+    const receiverId = data.to;
+    const callType = data.callType === "video" ? "video" : "audio";
 
-    if (!callerId || !receiverId || callerId === receiverId) {
-      return callback?.({
-        ok: false,
-        message: "Invalid call request",
-      });
+    if (
+      !callerId ||
+      !receiverId ||
+      callerId === receiverId ||
+      !isValidUser(receiverId)
+    ) {
+      callback?.({ ok: false, message: "Invalid call request" });
+      return;
     }
 
-    if (!USERS.some((user) => user.id === receiverId)) {
-      return callback?.({
-        ok: false,
-        message: "User not found",
-      });
-    }
-
-    if (!userSockets.has(receiverId)) {
-      return callback?.({
-        ok: false,
-        message: "User is offline",
-      });
-    }
-
-    const alreadyCalling = [...activeCalls.values()].some(
-      (call) =>
-        call.callerId === callerId ||
-        call.receiverId === callerId ||
-        call.callerId === receiverId ||
-        call.receiverId === receiverId
-    );
-
-    if (alreadyCalling) {
-      return callback?.({
-        ok: false,
-        message: "User is already in a call",
-      });
-    }
-
-    const caller = USERS.find(
-      (user) => user.id === callerId
-    );
-
-    const callId =
-      `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-    const callType =
-      data.callType === "audio" ? "audio" : "video";
+    const callId = data.callId || newId();
 
     const call = {
       callId,
       callerId,
       receiverId,
       callType,
-      status: "ringing",
-      createdAt: new Date().toISOString(),
+      time: new Date().toISOString(),
+      connected: false,
     };
 
-    activeCalls.set(callId, call);
+    // Offline recipient: save missed call for their next login.
+    if (!userSockets.has(receiverId)) {
+      addMissedCall(receiverId, {
+        callId,
+        callerId,
+        callType,
+        time: call.time,
+      });
+
+      callback?.({
+        ok: false,
+        offline: true,
+        callId,
+        message: "User is offline. Missed call saved.",
+      });
+
+      return;
+    }
+
+    calls.set(callId, call);
 
     io.to(receiverId).emit("incoming_call", {
       callId,
       from: callerId,
-      callerName: caller?.name || callerId,
+      callerId,
       callType,
+      type: callType,
+      callerName: USERS.find((u) => u.id === callerId)?.name || callerId,
     });
 
-    callback?.({
-      ok: true,
-      callId,
-      message: "Calling...",
-    });
-
-    console.log("Call started:", callerId, receiverId);
+    callback?.({ ok: true, callId });
+    console.log("Call ringing:", callerId, "->", receiverId);
   });
 
-  // ACCEPT CALL
-  socket.on("accept_call", (data, callback) => {
-    const call = activeCalls.get(data?.callId);
+  socket.on("accept_call", (data = {}, callback) => {
+    const call = calls.get(data.callId);
 
-    if (
-      !call ||
-      call.receiverId !== socket.userId ||
-      call.status !== "ringing"
-    ) {
-      return callback?.({
-        ok: false,
-        message: "Invalid or expired call",
-      });
+    if (!call || socket.userId !== call.receiverId) {
+      callback?.({ ok: false, message: "Call not found" });
+      return;
     }
 
-    call.status = "accepted";
+    call.accepted = true;
 
     io.to(call.callerId).emit("call_accepted", {
       callId: call.callId,
-      from: socket.userId,
     });
 
-    callback?.({ ok: true });
-
-    console.log("Call accepted:", call.callId);
+    callback?.({ ok: true, callId: call.callId });
   });
 
-  // REJECT CALL
-  socket.on("reject_call", (data, callback) => {
-    const call = activeCalls.get(data?.callId);
+  socket.on("reject_call", (data = {}, callback) => {
+    const call = calls.get(data.callId);
 
-    if (
-      !call ||
-      call.receiverId !== socket.userId ||
-      call.status !== "ringing"
-    ) {
-      return callback?.({
-        ok: false,
-        message: "Invalid call",
-      });
+    if (!call || socket.userId !== call.receiverId) {
+      callback?.({ ok: false, message: "Call not found" });
+      return;
     }
 
     io.to(call.callerId).emit("call_rejected", {
       callId: call.callId,
-      from: socket.userId,
+      reason: "rejected",
     });
 
-    activeCalls.delete(call.callId);
+    io.to(call.callerId).emit("call_ended", {
+      callId: call.callId,
+      reason: "rejected",
+    });
 
+    io.to(call.receiverId).emit("call_ended", {
+      callId: call.callId,
+      reason: "rejected",
+    });
+
+    calls.delete(call.callId);
     callback?.({ ok: true });
-
-    console.log("Call rejected:", call.callId);
   });
 
-  // WEBRTC OFFER
-  socket.on("webrtc_offer", (data) => {
-    const call = getCall(data?.callId, socket.userId);
+  socket.on("end_call", (data = {}, callback) => {
+    const call = calls.get(data.callId);
 
-    if (
-      !call ||
-      call.callerId !== socket.userId ||
-      call.status !== "accepted" ||
-      !data.offer
-    ) return;
-
-    io.to(call.receiverId).emit("webrtc_offer", {
-      callId: call.callId,
-      offer: data.offer,
-      from: socket.userId,
-    });
-  });
-
-  // WEBRTC ANSWER
-  socket.on("webrtc_answer", (data) => {
-    const call = getCall(data?.callId, socket.userId);
-
-    if (
-      !call ||
-      call.receiverId !== socket.userId ||
-      call.status !== "accepted" ||
-      !data.answer
-    ) return;
-
-    io.to(call.callerId).emit("webrtc_answer", {
-      callId: call.callId,
-      answer: data.answer,
-      from: socket.userId,
-    });
-  });
-
-  // ICE CANDIDATE
-  socket.on("ice_candidate", (data) => {
-    const call = getCall(data?.callId, socket.userId);
-
-    if (
-      !call ||
-      call.status !== "accepted" ||
-      !data.candidate
-    ) return;
-
-    const otherUser =
-      call.callerId === socket.userId
-        ? call.receiverId
-        : call.callerId;
-
-    io.to(otherUser).emit("ice_candidate", {
-      callId: call.callId,
-      candidate: data.candidate,
-      from: socket.userId,
-    });
-  });
-
-  // END CALL
-  socket.on("end_call", (data, callback) => {
-    const call = getCall(data?.callId, socket.userId);
-
-    if (!call) {
-      return callback?.({
-        ok: false,
-        message: "Call not found",
-      });
+    if (!call || ![call.callerId, call.receiverId].includes(socket.userId)) {
+      callback?.({ ok: false, message: "Call not found" });
+      return;
     }
 
-    endActiveCall(data.callId, socket.userId);
-
+    finishCall(call.callId, "ended", socket.userId);
     callback?.({ ok: true });
-
-    console.log("Call ended:", data.callId);
   });
 
-  // =====================================
-  // DISCONNECT
-  // =====================================
+  socket.on("webrtc_offer", (data = {}) => {
+    const call = calls.get(data.callId);
+    if (!call || !data.offer) return;
+
+    const peerId = getCallPeer(call, socket.userId);
+    if (!peerId) return;
+
+    io.to(peerId).emit("webrtc_offer", {
+      callId: data.callId,
+      offer: data.offer,
+    });
+  });
+
+  socket.on("webrtc_answer", (data = {}) => {
+    const call = calls.get(data.callId);
+    if (!call || !data.answer) return;
+
+    call.connected = true;
+
+    const peerId = getCallPeer(call, socket.userId);
+    if (!peerId) return;
+
+    io.to(peerId).emit("webrtc_answer", {
+      callId: data.callId,
+      answer: data.answer,
+    });
+  });
+
+  socket.on("ice_candidate", (data = {}) => {
+    const call = calls.get(data.callId);
+    if (!call || !data.candidate) return;
+
+    const peerId = getCallPeer(call, socket.userId);
+    if (!peerId) return;
+
+    io.to(peerId).emit("ice_candidate", {
+      callId: data.callId,
+      candidate: data.candidate,
+    });
+  });
+
+  // ---------------- DISCONNECT ----------------
 
   socket.on("disconnect", () => {
     const userId = socket.userId;
-
-    if (!userId) return;
-
-    // End active calls
-    for (const [callId, call] of activeCalls.entries()) {
-      if (
-        call.callerId === userId ||
-        call.receiverId === userId
-      ) {
-        endActiveCall(callId, userId);
-      }
-    }
-
-    if (!userSockets.has(userId)) return;
+    if (!userId || !userSockets.has(userId)) return;
 
     const sockets = userSockets.get(userId);
     sockets.delete(socket.id);
@@ -610,17 +536,39 @@ io.on("connection", (socket) => {
     if (sockets.size === 0) {
       userSockets.delete(userId);
       lastSeen[userId] = new Date().toISOString();
+
+      // End calls involving the disconnected user.
+      for (const [callId, call] of calls.entries()) {
+        if (call.callerId === userId || call.receiverId === userId) {
+          const peerId = getCallPeer(call, userId);
+
+          if (!call.connected && call.callerId === userId) {
+            addMissedCall(call.receiverId, {
+              callId,
+              callerId: call.callerId,
+              callType: call.callType,
+              time: call.time,
+            });
+          }
+
+          io.to(peerId).emit("call_ended", {
+            callId,
+            reason: "disconnected",
+          });
+
+          calls.delete(callId);
+        }
+      }
     }
 
     emitPresence();
+    saveData();
 
     console.log("Disconnected:", userId);
   });
 });
 
-// =====================================
-// SERVE REACT FRONTEND
-// =====================================
+// ---------------- FRONTEND ----------------
 
 const frontendDist = path.join(__dirname, "../frontend/dist");
 
@@ -640,20 +588,13 @@ if (fs.existsSync(frontendDist)) {
   });
 
   console.log("React frontend found:", frontendDist);
-
 } else {
-  console.log("Frontend dist folder not found:", frontendDist);
-
   app.get("/", (req, res) => {
-    res.send(
-      "UDTConnect backend is running. Frontend build not found."
-    );
+    res.send("UDTConnect backend is running. Frontend build not found.");
   });
 }
 
-// =====================================
-// START SERVER
-// =====================================
+loadData();
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`UDTConnect running on port ${PORT}`);

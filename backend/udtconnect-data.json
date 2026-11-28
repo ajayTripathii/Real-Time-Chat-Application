@@ -1,0 +1,30 @@
+{
+  "messages": [
+    {
+      "id": "1795851736997-13e40ab5eccac8",
+      "senderId": "ryan",
+      "receiverId": "jasprit",
+      "text": "",
+      "file": null,
+      "time": "2026-11-28T07:42:16.997Z",
+      "status": "delivered",
+      "deleted": true
+    },
+    {
+      "id": "1795851813128-c95ad85a77901",
+      "senderId": "ryan",
+      "receiverId": "jasprit",
+      "text": "",
+      "file": null,
+      "time": "2026-11-28T07:43:33.128Z",
+      "status": "delivered",
+      "deleted": true
+    }
+  ],
+  "missedCalls": [],
+  "lastSeen": {
+    "jasprit": "2026-11-28T07:16:36.009Z",
+    "ajay": "2026-11-28T07:18:01.486Z",
+    "ryan": "2026-11-28T07:42:00.925Z"
+  }
+}

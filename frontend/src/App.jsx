@@ -47,6 +47,28 @@ const dayLabel = (v) => {
   });
 };
 
+const callDuration = (entry) => {
+  if (Number.isFinite(entry?.durationSeconds)) return entry.durationSeconds;
+  if (entry?.connectedAt && entry?.endedAt) {
+    return Math.max(
+      0,
+      Math.floor(
+        (new Date(entry.endedAt) - new Date(entry.connectedAt)) / 1000,
+      ),
+    );
+  }
+  return 0;
+};
+
+const formatDuration = (seconds = 0) => {
+  const safe = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return minutes
+    ? `${minutes}:${String(secs).padStart(2, "0")}`
+    : `0:${String(secs).padStart(2, "0")}`;
+};
+
 const seenText = (v) =>
   sameDay(v, new Date())
     ? `today at ${hm(v)}`
@@ -104,8 +126,10 @@ const ICONS = {
   emoji:
     "M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm3.5-9c.83 0 1.5-.67 1.5-1.5S16.33 8 15.5 8 14 8.67 14 9.5s.67 1.5 1.5 1.5zm-7 0c.83 0 1.5-.67 1.5-1.5S9.33 8 8.5 8 7 8.67 7 9.5 7.67 11 8.5 11zm3.5 6.5c2.33 0 4.31-1.46 5.11-3.5H6.89c.8 2.04 2.78 3.5 5.11 3.5z",
   mic: "M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z",
-  speaker: "M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z",
-  speaker_off: "M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.18l2.45 2.45c.03-.2.05-.4.05-.6zM19 12c0 .94-.2 1.83-.55 2.64l1.51 1.51A8.9 8.9 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM3.27 2 2 3.27 7.73 9H3v6h4l5 5v-7.73l4.25 4.25c-.67.52-1.43.92-2.25 1.16v2.06c1.38-.31 2.63-.97 3.64-1.87L19.73 22 21 20.73 3.27 2zM10 6.27 8.73 7.54 10 8.81V6.27z" ,
+  speaker:
+    "M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z",
+  speaker_off:
+    "M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.18l2.45 2.45c.03-.2.05-.4.05-.6zM19 12c0 .94-.2 1.83-.55 2.64l1.51 1.51A8.9 8.9 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM3.27 2 2 3.27 7.73 9H3v6h4l5 5v-7.73l4.25 4.25c-.67.52-1.43.92-2.25 1.16v2.06c1.38-.31 2.63-.97 3.64-1.87L19.73 22 21 20.73 3.27 2zM10 6.27 8.73 7.54 10 8.81V6.27z",
   mic_off:
     "M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z",
   send: "M2.01 21L23 12 2.01 3 2 10l15 2-15 2z",
@@ -332,55 +356,9 @@ export default function App() {
     }
   }
 
-  function startRingtone(kind = "incoming") {
+  // Generated beeps/ringback tones are disabled. Call audio is only the remote voice stream.
+  function startRingtone() {
     stopRingtone();
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return;
-
-    let context;
-    try {
-      context = new AudioContextClass();
-      ringtoneContextRef.current = context;
-      context.resume?.().catch(() => {});
-    } catch (error) {
-      console.warn("Ringtone audio is unavailable:", error);
-      return;
-    }
-
-    const playTone = (frequency, delay = 0, duration = 0.42) => {
-      window.setTimeout(() => {
-        if (ringtoneContextRef.current !== context || context.state === "closed") return;
-        try {
-          const oscillator = context.createOscillator();
-          const gain = context.createGain();
-          oscillator.type = "sine";
-          oscillator.frequency.value = frequency;
-          gain.gain.setValueAtTime(0.0001, context.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.12, context.currentTime + 0.025);
-          gain.gain.setValueAtTime(0.12, context.currentTime + duration - 0.06);
-          gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + duration);
-          oscillator.connect(gain);
-          gain.connect(context.destination);
-          oscillator.start();
-          oscillator.stop(context.currentTime + duration);
-          oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
-        } catch (error) {
-          console.warn("Could not play ringtone:", error);
-        }
-      }, delay);
-    };
-
-    const ringOnce = () => {
-      if (kind === "incoming") {
-        playTone(660, 0, 0.42);
-        playTone(880, 520, 0.42);
-      } else {
-        playTone(440, 0, 0.9);
-        playTone(480, 0, 0.9);
-      }
-    };
-    ringOnce();
-    ringtoneTimerRef.current = window.setInterval(ringOnce, kind === "incoming" ? 2200 : 2600);
   }
 
   // Ring only while the other person is being alerted / call is being placed.
@@ -457,13 +435,26 @@ export default function App() {
       }
     };
     peer.onconnectionstatechange = () => {
-      if (
-        peer.connectionState === "failed" ||
-        peer.connectionState === "disconnected"
-      ) {
+      if (peer.connectionState === "disconnected") {
+        setCallError("Network unstable… connection restore kar rahe hain.");
+        window.setTimeout(() => {
+          if (
+            peerRef.current === peer &&
+            peer.connectionState === "disconnected"
+          ) {
+            setCallError(
+              "Connection abhi bhi weak hai. Internet check karein.",
+            );
+          }
+        }, 12000);
+      }
+      if (peer.connectionState === "failed") {
         setCallError(
-          "Connection weak hai. Dobara connect karne ki koshish karein.",
+          "Connection failed. Network change karke dobara call karein.",
         );
+      }
+      if (peer.connectionState === "connecting") {
+        setCallError("Reconnecting…");
       }
       if (peer.connectionState === "connected" && callRef.current) {
         const updated = {
@@ -705,6 +696,16 @@ export default function App() {
         direction: current.direction === "incoming" ? "incoming" : "outgoing",
         status: current.status === "connected" ? "completed" : "missed",
         time: current.startedAt || new Date().toISOString(),
+        connectedAt: current.connectedAt || null,
+        endedAt: new Date().toISOString(),
+        durationSeconds: current.connectedAt
+          ? Math.max(
+              0,
+              Math.floor(
+                (Date.now() - new Date(current.connectedAt).getTime()) / 1000,
+              ),
+            )
+          : 0,
       });
     }
     stopCallMedia();
@@ -874,7 +875,10 @@ export default function App() {
 
     socket.on("disconnect", () => {
       setConnected(false);
-      if (callRef.current) stopCallMedia();
+      // Keep microphone and peer connection alive during a short Socket.IO reconnect.
+      if (callRef.current) {
+        setCallError("Network reconnecting… call ko hold par rakha gaya hai.");
+      }
     });
 
     socket.on("connect_error", (error) => {
@@ -1003,10 +1007,20 @@ export default function App() {
           status:
             data.reason === "rejected"
               ? "rejected"
-              : current.status === "connected"
+              : current.connectedAt || current.status === "connected"
                 ? "completed"
                 : "missed",
           time: current.startedAt || new Date().toISOString(),
+          connectedAt: current.connectedAt || null,
+          endedAt: new Date().toISOString(),
+          durationSeconds: current.connectedAt
+            ? Math.max(
+                0,
+                Math.floor(
+                  (Date.now() - new Date(current.connectedAt).getTime()) / 1000,
+                ),
+              )
+            : 0,
         });
       }
       if (data.reason === "rejected")
@@ -1172,6 +1186,15 @@ export default function App() {
       ),
     [allMsgs, me, active],
   );
+
+  const chatTimeline = useMemo(() => {
+    const callsForChat = callHistory
+      .filter((entry) => entry.userId === active)
+      .map((entry) => ({ ...entry, id: `call-${entry.id}`, kind: "call" }));
+    return [...chat, ...callsForChat].sort(
+      (a, b) => new Date(a.time || 0) - new Date(b.time || 0),
+    );
+  }, [chat, callHistory, active]);
 
   const info = useMemo(
     () =>
@@ -1724,12 +1747,52 @@ export default function App() {
             <Icon name="lock" size={12} /> Calls are peer-to-peer. Messages in
             this chat are stored on the UDTConnect server.
           </div>
-          {chat.map((message, index) => {
+          {chatTimeline.map((message, index) => {
+            if (message.kind === "call") {
+              const missed =
+                message.status === "missed" || message.status === "rejected";
+              const label =
+                message.status === "missed"
+                  ? "Missed call"
+                  : message.status === "rejected"
+                    ? "Call declined"
+                    : message.status === "calling"
+                      ? "Call attempt"
+                      : "Call completed";
+              return (
+                <React.Fragment key={message.id}>
+                  {(index === 0 ||
+                    !sameDay(chatTimeline[index - 1].time, message.time)) && (
+                    <div className="today">{dayLabel(message.time)}</div>
+                  )}
+                  <div className="call-chat-row">
+                    <div className={`call-chat-card ${missed ? "missed" : ""}`}>
+                      <span className="call-chat-icon">
+                        {message.type === "video" ? "▣" : "☎"}
+                      </span>
+                      <span className="call-chat-copy">
+                        <strong>{label}</strong>
+                        <small>
+                          {message.direction === "incoming"
+                            ? "Incoming"
+                            : "Outgoing"}{" "}
+                          · {message.type === "video" ? "Video" : "Audio"}
+                          {message.durationSeconds > 0
+                            ? ` · ${formatDuration(message.durationSeconds)}`
+                            : ""}
+                        </small>
+                      </span>
+                      <time>{hm(message.time)}</time>
+                    </div>
+                  </div>
+                </React.Fragment>
+              );
+            }
             const mine = message.senderId === me;
             return (
               <React.Fragment key={message.id}>
                 {(index === 0 ||
-                  !sameDay(chat[index - 1].time, message.time)) && (
+                  !sameDay(chatTimeline[index - 1].time, message.time)) && (
                   <div className="today">{dayLabel(message.time)}</div>
                 )}
                 <div className={`line ${mine ? "mine" : ""}`}>
@@ -1896,7 +1959,12 @@ export default function App() {
             />
           )}
           {call.type === "audio" && (
-            <audio ref={remoteAudioRef} autoPlay playsInline muted={!speakerOn} />
+            <audio
+              ref={remoteAudioRef}
+              autoPlay
+              playsInline
+              muted={!speakerOn}
+            />
           )}
 
           <div className="call-background-overlay" />
@@ -2010,7 +2078,10 @@ export default function App() {
                   aria-pressed={speakerOn}
                 >
                   <span>
-                    <Icon name={speakerOn ? "speaker" : "speaker_off"} size={26} />
+                    <Icon
+                      name={speakerOn ? "speaker" : "speaker_off"}
+                      size={26}
+                    />
                   </span>
                   <small>{speakerOn ? "Speaker on" : "Speaker off"}</small>
                 </button>

@@ -1680,3 +1680,76 @@ svg {
     height: 50px;
   }
 }
+
+/* Call records shown inline inside the selected conversation */
+.call-chat-row {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  margin: 5px 0;
+}
+
+.call-chat-card {
+  width: min(340px, 92%);
+  min-height: 66px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 13px;
+  border: 1px solid #3b334c;
+  border-radius: 13px;
+  background: #211d2b;
+  box-shadow: 0 2px 8px #0003;
+}
+
+.call-chat-card.missed {
+  border-color: #69404b;
+  background: #2b1d27;
+}
+
+.call-chat-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #392d58;
+  color: #c5adff;
+  font-size: 20px;
+}
+
+.call-chat-card.missed .call-chat-icon {
+  background: #4a2833;
+  color: #ff8d9d;
+}
+
+.call-chat-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.call-chat-copy strong {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.call-chat-copy small,
+.call-chat-card time {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.call-chat-card time {
+  flex-shrink: 0;
+}
+
+@media (max-width: 480px) {
+  .call-chat-card {
+    width: min(320px, 96%);
+    padding: 9px 11px;
+  }
+}
